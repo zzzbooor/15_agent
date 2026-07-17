@@ -1,0 +1,14 @@
+{
+  "conversation_id": "acceptance_full_agent",
+  "execution_mode": "integrated",
+  "user_input": "请同时读取 docs/agent_intro.txt，并使用计算器计算 23 * 17 + 9，最后合并回答。",
+  "system_prompt_path": "../../prompts/local_tool_agent.txt",
+  "selected_memory_ids": ["mem_course_001"],
+  "use_global_memory": true,
+  "toolset": "basic_tools",
+  "max_turns": 3,
+  "save_memory": "none",
+  "model_profile": "qwen35_4b",
+  "tool_binding": "native_tools",
+  "decision_strategy": "react"
+}

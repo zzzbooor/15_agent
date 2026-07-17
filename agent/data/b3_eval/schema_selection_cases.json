@@ -1,0 +1,18 @@
+[
+  {
+    "task": "请精确计算 23 * 17 + 9。",
+    "expected_tool": "calculator"
+  },
+  {
+    "task": "请读取 docs/agent_intro.txt。",
+    "expected_tool": "file_reader"
+  },
+  {
+    "task": "请搜索 docs 目录中关于 Memory 的本地资料。",
+    "expected_tool": "local_file_search"
+  },
+  {
+    "task": "请分析 tables/results.csv 的行列和统计值。",
+    "expected_tool": "table_analyzer"
+  }
+]

@@ -1,0 +1,23 @@
+{
+  "conversation_id": "conv_b1_multi_turn",
+  "execution_mode": "integrated",
+  "user_input": "帮我阅读 docs/agent_intro.txt，总结三条中文要点。",
+  "conversation_turns": [
+    {
+      "user_input": "帮我阅读 docs/agent_intro.txt，总结三条中文要点。"
+    },
+    {
+      "user_input": "再读一次 docs/agent_intro.txt，用更短的三条要点回答。",
+      "prompt_template_paths": ["../../prompts/strict_summary_agent.txt"]
+    }
+  ],
+  "system_prompt_path": "../../prompts/local_tool_agent.txt",
+  "prompt_template_paths": ["../../prompts/strict_summary_agent.txt"],
+  "selected_memory_ids": ["mem_conversation_conv_000"],
+  "use_global_memory": true,
+  "toolset": "basic_tools",
+  "max_turns": 4,
+  "save_memory": "none",
+  "history_summary_max_chars": 1200,
+  "history_summary_keep_last": 5
+}

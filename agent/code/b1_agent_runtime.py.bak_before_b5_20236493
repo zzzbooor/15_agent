@@ -1,0 +1,653 @@
+from __future__ import annotations
+
+import argparse
+import sys
+from copy import deepcopy
+from pathlib import Path
+from time import perf_counter
+from typing import Any
+
+from common.io_utils import append_jsonl, read_json, read_text, read_yaml, write_json, write_text
+from common.logging_utils import now_iso
+from common.path_utils import resolve_cli_path, resolve_from_file
+from common.schemas import validate_ai_message
+
+
+def _validate_runtime_input(payload: dict) -> dict:
+    if not isinstance(payload, dict):
+        raise ValueError("runtime_input.json must contain an object")
+    execution_mode = payload.setdefault("execution_mode", "integrated")
+    if execution_mode not in {"integrated", "fixture"}:
+        raise ValueError("execution_mode must be integrated or fixture")
+    required = ["conversation_id", "user_input", "system_prompt_path", "toolset", "max_turns", "save_memory"]
+    missing = [field for field in required if field not in payload]
+    if missing:
+        raise ValueError(f"runtime input missing: {', '.join(missing)}")
+    if not isinstance(payload["conversation_id"], str) or not payload["conversation_id"]:
+        raise ValueError("conversation_id must be a non-empty string")
+    if not isinstance(payload["user_input"], str) or not payload["user_input"].strip():
+        raise ValueError("user_input must be a non-empty string")
+    if not isinstance(payload["max_turns"], int) or isinstance(payload["max_turns"], bool) or payload["max_turns"] < 1:
+        raise ValueError("max_turns must be a positive integer")
+    if payload["save_memory"] not in {"none", "conversation", "global"}:
+        raise ValueError("save_memory must be none, conversation, or global")
+    if execution_mode == "fixture":
+        fixtures = payload.get("fixtures")
+        if not isinstance(fixtures, dict):
+            raise ValueError("fixture mode requires a fixtures object")
+        required_fixtures = [
+            "selected_memory_path",
+            "tools_schema_path",
+            "ai_messages_path",
+            "tool_messages_path",
+        ]
+        missing_fixtures = [field for field in required_fixtures if not isinstance(fixtures.get(field), str)]
+        if missing_fixtures:
+            raise ValueError(f"fixtures missing paths: {', '.join(missing_fixtures)}")
+        if payload["save_memory"] != "none":
+            raise ValueError("fixture mode requires save_memory=none")
+    else:
+        selected_ids = payload.setdefault("selected_memory_ids", [])
+        if not isinstance(selected_ids, list) or not all(isinstance(item, str) for item in selected_ids):
+            raise ValueError("selected_memory_ids must be a list of strings")
+        payload.setdefault("use_global_memory", False)
+        if not isinstance(payload["use_global_memory"], bool):
+            raise ValueError("use_global_memory must be boolean")
+    if "conversation_turns" in payload:
+        turns = payload["conversation_turns"]
+        if not isinstance(turns, list) or not turns:
+            raise ValueError("conversation_turns must be a non-empty list")
+        normalized_turns = []
+        for index, item in enumerate(turns, 1):
+            if isinstance(item, str):
+                normalized_turns.append({"user_input": item})
+            elif isinstance(item, dict) and isinstance(item.get("user_input"), str) and item["user_input"].strip():
+                normalized_turns.append(dict(item))
+            else:
+                raise ValueError(f"conversation_turns[{index}] must be a string or object with user_input")
+        payload["conversation_turns"] = normalized_turns
+    if "prompt_template_paths" in payload:
+        templates = payload["prompt_template_paths"]
+        if not isinstance(templates, list) or not all(isinstance(item, str) for item in templates):
+            raise ValueError("prompt_template_paths must be a list of strings")
+    if "history_summary_max_chars" in payload:
+        max_chars = payload["history_summary_max_chars"]
+        if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 200:
+            raise ValueError("history_summary_max_chars must be an integer >= 200")
+    return payload
+
+
+def _runtime_turns(runtime: dict) -> list[dict]:
+    if "conversation_turns" in runtime:
+        return runtime["conversation_turns"]
+    return [{"user_input": runtime["user_input"]}]
+
+
+def _load_system_prompt(input_file: Path, runtime: dict, turn: dict | None = None) -> str:
+    prompt_source = turn or runtime
+    prompt_path_value = prompt_source.get("system_prompt_path", runtime["system_prompt_path"])
+    prompt_path = resolve_from_file(prompt_path_value, input_file)
+    parts = [read_text(prompt_path).strip()]
+    template_paths = list(runtime.get("prompt_template_paths", []))
+    template_paths.extend(prompt_source.get("prompt_template_paths", []))
+    for template_path in template_paths:
+        path = resolve_from_file(template_path, input_file)
+        parts.append(read_text(path).strip())
+    return "\n\n".join(part for part in parts if part)
+
+
+def _summarize_messages(messages: list[dict], max_chars: int, keep_last: int = 4) -> list[dict]:
+    if not messages or max_chars <= 0:
+        return messages
+    total_chars = sum(len(str(message.get("content", ""))) for message in messages)
+    if total_chars <= max_chars:
+        return messages
+    protected = messages[:1]
+    recent = messages[-keep_last:] if keep_last > 0 else []
+    older = messages[1 : len(messages) - len(recent)]
+    summary_lines = []
+    for index, message in enumerate(older, 1):
+        role = message.get("role", "unknown")
+        content = str(message.get("content", "")).replace("\n", " ").strip()
+        tool_calls = message.get("tool_calls")
+        if tool_calls:
+            names = ", ".join(call.get("name", "unknown") for call in tool_calls)
+            content = f"requested tools: {names}"
+        if len(content) > 180:
+            content = content[:177] + "..."
+        summary_lines.append(f"{index}. {role}: {content}")
+    summary = {
+        "role": "system",
+        "content": "[Compressed History]\n" + "\n".join(summary_lines),
+    }
+    return protected + [summary] + recent
+
+
+def _write_checkpoint(output_dir: Path, state: dict[str, Any]) -> Path:
+    checkpoint = output_dir / "checkpoint.json"
+    write_json(state, checkpoint)
+    return checkpoint
+
+
+def _load_checkpoint(path: str | Path) -> dict[str, Any]:
+    state = read_json(path)
+    if not isinstance(state, dict) or state.get("checkpoint_version") != 1:
+        raise ValueError("checkpoint is missing checkpoint_version=1")
+    if state.get("status") not in {"running", "success", "partial", "max_turns_exceeded", "llm_parse_error"}:
+        raise ValueError("checkpoint has invalid status")
+    return state
+
+
+def _memory_context(selected_memory: dict) -> str:
+    sections = []
+    for document in selected_memory.get("selected_memory_docs", []):
+        sections.append(
+            f'<memory id="{document["memory_id"]}" type="{document["memory_type"]}">\n'
+            f'{document["content"].strip()}\n</memory>'
+        )
+    return "\n\n".join(sections)
+
+
+def _default_llm_mode(model_config: Path) -> str:
+    config = read_yaml(model_config)
+    return config.get("runtime", {}).get("default_mode", "mock")
+
+
+def generate_ai_message(*args, **kwargs) -> dict:
+    """Lazy B4 proxy retained as the integrated-mode injection point."""
+    from b4_local_agent_llm import generate_ai_message as b4_generate_ai_message
+
+    return b4_generate_ai_message(*args, **kwargs)
+
+
+def _load_fixture_inputs(input_file: Path, runtime: dict) -> dict:
+    fixtures = runtime["fixtures"]
+    selected_memory = read_json(resolve_from_file(fixtures["selected_memory_path"], input_file))
+    tools_schema = read_json(resolve_from_file(fixtures["tools_schema_path"], input_file))
+    ai_messages = read_json(resolve_from_file(fixtures["ai_messages_path"], input_file))
+    tool_messages = read_json(resolve_from_file(fixtures["tool_messages_path"], input_file))
+    if not isinstance(selected_memory, dict):
+        raise ValueError("preset memory must be a JSON object")
+    if not isinstance(tools_schema, list):
+        raise ValueError("preset tools_schema must be a JSON array")
+    if not isinstance(ai_messages, list) or not ai_messages:
+        raise ValueError("preset AI messages must be a non-empty JSON array")
+    if not isinstance(tool_messages, dict):
+        raise ValueError("preset ToolMessages must be an object keyed by tool_call_id")
+    for message in ai_messages:
+        validate_ai_message(message)
+    return {
+        "selected_memory": selected_memory,
+        "tools_schema": tools_schema,
+        "ai_messages": ai_messages,
+        "tool_messages": tool_messages,
+    }
+
+
+def _fixture_tool_messages(tool_calls: list[dict], preset_messages: dict) -> list[dict]:
+    results = []
+    for call in tool_calls:
+        call_id = call.get("id")
+        message = deepcopy(preset_messages.get(call_id))
+        if not isinstance(message, dict):
+            raise ValueError(f"fixture ToolMessage does not exist for tool_call_id: {call_id}")
+        if message.get("role") != "tool" or message.get("tool_call_id") != call_id:
+            raise ValueError(f"invalid fixture ToolMessage for tool_call_id: {call_id}")
+        if message.get("name") != call.get("name"):
+            raise ValueError(f"fixture ToolMessage name does not match call: {call_id}")
+        results.append(message)
+    return results
+
+
+def run_agent(
+    input_path: str,
+    tools_config: str | None,
+    memory_config: str | None,
+    model_config: str | None,
+    outdir: str,
+    llm_mode: str | None = None,
+    resume: str | None = None,
+) -> dict:
+    started = perf_counter()
+    input_file = Path(input_path).resolve()
+    output_dir = Path(outdir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fixture_data = None
+    tools_file = memory_file = model_file = None
+    if resume:
+        state = _load_checkpoint(resume)
+        runtime = state["runtime"]
+        execution_mode = runtime["execution_mode"]
+        selected_memory = state["selected_memory"]
+        tools_schema = state["tools_schema"]
+        mode = state["llm_mode"]
+        messages = state["messages"]
+        tool_rounds = state["tool_rounds"]
+        llm_calls = state["llm_calls"]
+        turns = state["turns"]
+        all_tool_messages = state["all_tool_messages"]
+        final_answer = state.get("final_answer", "")
+        status = state["status"]
+        terminal_error = state.get("terminal_error")
+        warnings = state.get("warnings", [])
+        next_user_turn_index = state.get("next_user_turn_index", 0)
+        active_user_turn_index = state.get("active_user_turn_index")
+        if execution_mode == "fixture":
+            fixture_data = _load_fixture_inputs(input_file, runtime)
+        else:
+            if not tools_config or not memory_config or not model_config:
+                raise ValueError("resume integrated mode requires tools_config, memory_config, and model_config")
+            from b3_tool_layer import execute_tool_calls
+
+            tools_file = Path(tools_config).resolve()
+            memory_file = Path(memory_config).resolve()
+            model_file = Path(model_config).resolve()
+        if status != "running":
+            print(f"checkpoint already finished with status={status}")
+    else:
+        runtime = _validate_runtime_input(read_json(input_file))
+        print(f"user_input: {runtime['user_input']}")
+        execution_mode = runtime["execution_mode"]
+        if execution_mode == "fixture":
+            fixture_data = _load_fixture_inputs(input_file, runtime)
+            selected_memory = fixture_data["selected_memory"]
+            tools_schema = fixture_data["tools_schema"]
+            mode = "fixture"
+        else:
+            if not tools_config or not memory_config or not model_config:
+                raise ValueError("integrated mode requires tools_config, memory_config, and model_config")
+            from b3_tool_layer import execute_tool_calls, get_tools_schema
+            from b5_memory import load_memory
+
+            tools_file = Path(tools_config).resolve()
+            memory_file = Path(memory_config).resolve()
+            model_file = Path(model_config).resolve()
+            selected_memory = load_memory(
+                str(memory_file),
+                runtime["selected_memory_ids"],
+                runtime["use_global_memory"],
+                runtime["user_input"],
+                str(output_dir),
+            )
+            tools_schema = get_tools_schema(str(tools_file), runtime["toolset"], str(output_dir))
+            mode = llm_mode or _default_llm_mode(model_file)
+        first_turn = _runtime_turns(runtime)[0]
+        system_prompt = _load_system_prompt(input_file, runtime, first_turn)
+        memory_context = _memory_context(selected_memory)
+        if memory_context:
+            system_prompt = f"{system_prompt}\n\n{memory_context}"
+        messages = [{"role": "system", "content": system_prompt}]
+        history_path = runtime.get("history_messages_path")
+        if isinstance(history_path, str):
+            history_messages = read_json(resolve_from_file(history_path, input_file))
+            if not isinstance(history_messages, list):
+                raise ValueError("history_messages_path must point to a JSON message array")
+            messages.extend(history_messages)
+        tool_rounds = 0
+        llm_calls = 0
+        turns = []
+        all_tool_messages = []
+        final_answer = ""
+        status = "running"
+        terminal_error = None
+        warnings = []
+        next_user_turn_index = 0
+        active_user_turn_index = None
+        if selected_memory.get("status") in {"partial", "error"}:
+            warnings.append("memory selection completed with errors")
+
+    def save_state() -> None:
+        _write_checkpoint(
+            output_dir,
+            {
+                "checkpoint_version": 1,
+                "runtime": runtime,
+                "input_path": str(input_file),
+                "selected_memory": selected_memory,
+                "tools_schema": tools_schema,
+                "llm_mode": mode,
+                "messages": messages,
+                "tool_rounds": tool_rounds,
+                "llm_calls": llm_calls,
+                "turns": turns,
+                "all_tool_messages": all_tool_messages,
+                "final_answer": final_answer,
+                "status": status,
+                "terminal_error": terminal_error,
+                "warnings": warnings,
+                "next_user_turn_index": next_user_turn_index,
+                "active_user_turn_index": active_user_turn_index,
+                "updated_at": now_iso(),
+            },
+        )
+
+    save_state()
+    user_turns = _runtime_turns(runtime)
+    history_max_chars = runtime.get("history_summary_max_chars")
+    keep_last = runtime.get("history_summary_keep_last", 4)
+
+    while status == "running" and next_user_turn_index < len(user_turns):
+        if active_user_turn_index is None:
+            current_user_turn = user_turns[next_user_turn_index]
+            active_user_turn_index = next_user_turn_index
+            if next_user_turn_index > 0 and (
+                "system_prompt_path" in current_user_turn or current_user_turn.get("prompt_template_paths")
+            ):
+                messages.append({"role": "system", "content": _load_system_prompt(input_file, runtime, current_user_turn)})
+            messages.append({"role": "user", "content": current_user_turn["user_input"]})
+            if isinstance(history_max_chars, int):
+                messages = _summarize_messages(messages, history_max_chars, keep_last)
+        else:
+            current_user_turn = user_turns[active_user_turn_index]
+
+        while True:
+            llm_calls += 1
+            turn_start = perf_counter()
+            if execution_mode == "fixture":
+                if llm_calls > len(fixture_data["ai_messages"]):
+                    raise ValueError("fixture AIMessage sequence ended before a final answer")
+                ai_message = deepcopy(fixture_data["ai_messages"][llm_calls - 1])
+                llm_status = "success"
+                llm_error = None
+            else:
+                llm_result = generate_ai_message(
+                    str(model_file),
+                    messages,
+                    tools_schema,
+                    mode,
+                    str(output_dir / "llm_calls"),
+                    f"llm_call_{llm_calls:03d}",
+                )
+                if not isinstance(llm_result, dict) or not isinstance(llm_result.get("ai_message"), dict):
+                    raise ValueError("B4 result must contain an ai_message object")
+                ai_message = llm_result["ai_message"]
+                llm_status = llm_result.get("status")
+                llm_error = llm_result.get("error")
+            messages.append(ai_message)
+            turn = {
+                "turn_index": llm_calls,
+                "user_turn_index": next_user_turn_index + 1,
+                "user_input": current_user_turn["user_input"],
+                "ai_message": ai_message,
+                "llm_status": llm_status,
+                "llm_error": llm_error,
+                "tool_messages": [],
+                "latency_ms": None,
+            }
+            if llm_status != "success":
+                status = "llm_parse_error"
+                terminal_error = {
+                    "type": "LLMParseError",
+                    "message": "B4 failed to parse the model output as a valid AIMessage JSON object.",
+                    "llm_call_index": llm_calls,
+                    "cause": llm_error,
+                }
+                turn["latency_ms"] = round((perf_counter() - turn_start) * 1000, 3)
+                turns.append(turn)
+                save_state()
+                break
+            tool_calls = ai_message.get("tool_calls", [])
+            if not tool_calls:
+                final_answer = ai_message["content"]
+                print(f"content: {final_answer}")
+                turn["latency_ms"] = round((perf_counter() - turn_start) * 1000, 3)
+                turns.append(turn)
+                next_user_turn_index += 1
+                active_user_turn_index = None
+                save_state()
+                break
+            if tool_rounds >= runtime["max_turns"]:
+                requested = ", ".join(call.get("name", "unknown") for call in tool_calls)
+                final_answer = f"Stopped because max_turns was exceeded. Last requested tools: {requested}."
+                status = "max_turns_exceeded"
+                terminal_error = {
+                    "type": "MaxTurnsExceeded",
+                    "message": final_answer,
+                    "unexecuted_tool_calls": tool_calls,
+                }
+                turn["latency_ms"] = round((perf_counter() - turn_start) * 1000, 3)
+                turns.append(turn)
+                save_state()
+                break
+            if execution_mode == "fixture":
+                tool_messages = _fixture_tool_messages(tool_calls, fixture_data["tool_messages"])
+            else:
+                tool_messages = execute_tool_calls(
+                    tool_calls,
+                    str(tools_file),
+                    runtime["toolset"],
+                    str(output_dir),
+                )
+            tool_rounds += 1
+            messages.extend(tool_messages)
+            all_tool_messages.extend(tool_messages)
+            turn["tool_messages"] = tool_messages
+            turn["latency_ms"] = round((perf_counter() - turn_start) * 1000, 3)
+            turns.append(turn)
+            save_state()
+
+    if status == "running":
+        status = "success"
+        save_state()
+
+    write_json(messages, output_dir / "messages.json")
+    if execution_mode == "integrated":
+        write_json(all_tool_messages, output_dir / "tool_messages.json")
+    write_text(final_answer.strip() + "\n", output_dir / "final_answer.md")
+    memory_save = {"requested": runtime["save_memory"], "status": "not_requested"}
+    if status != "success" and runtime["save_memory"] != "none":
+        memory_save = {"requested": runtime["save_memory"], "status": "skipped", "reason": status}
+    trace = {
+        "conversation_id": runtime["conversation_id"],
+        "execution_mode": execution_mode,
+        "status": status,
+        "toolset": runtime["toolset"],
+        "max_turns": runtime["max_turns"],
+        "user_turn_count": len(user_turns),
+        "tool_rounds_used": tool_rounds,
+        "llm_call_count": llm_calls,
+        "turns": turns,
+        "final_answer_path": "final_answer.md",
+        "memory_save": memory_save,
+        "warnings": warnings,
+        "error": terminal_error,
+    }
+    write_json(trace, output_dir / "trace.json")
+
+    saved_memory = None
+    if execution_mode == "integrated" and runtime["save_memory"] != "none" and trace["status"] == "success":
+        try:
+            from b5_memory import save_memory
+
+            saved_memory = save_memory(
+                str(memory_file),
+                runtime["conversation_id"],
+                runtime["save_memory"],
+                str(output_dir / "messages.json"),
+                str(output_dir / "trace.json"),
+                str(output_dir / "final_answer.md"),
+                str(output_dir),
+            )
+            trace["memory_save"] = {"requested": runtime["save_memory"], "status": "success"}
+        except Exception as exc:
+            trace["memory_save"] = {
+                "requested": runtime["save_memory"],
+                "status": "error",
+                "error": {"type": type(exc).__name__, "message": str(exc)},
+            }
+            trace["warnings"].append("memory save failed")
+            if trace["status"] == "success":
+                trace["status"] = "partial"
+        write_json(trace, output_dir / "trace.json")
+
+    result = {
+        "conversation_id": runtime["conversation_id"],
+        "execution_mode": execution_mode,
+        "status": trace["status"],
+        "final_answer": final_answer,
+        "messages_path": str(output_dir / "messages.json"),
+        "trace_path": str(output_dir / "trace.json"),
+        "final_answer_path": str(output_dir / "final_answer.md"),
+        "selected_memory": selected_memory,
+        "saved_memory": saved_memory,
+        "elapsed_ms": round((perf_counter() - started) * 1000, 3),
+    }
+    if execution_mode == "integrated":
+        append_jsonl(
+            {
+                "timestamp": now_iso(),
+                "conversation_id": runtime["conversation_id"],
+                "execution_mode": execution_mode,
+                "status": trace["status"],
+                "llm_mode": mode,
+                "tool_rounds_used": tool_rounds,
+                "llm_call_count": llm_calls,
+                "elapsed_ms": result["elapsed_ms"],
+            },
+            output_dir / "runtime_log.jsonl",
+        )
+    return result
+
+
+def run_batch(
+    batch_input_path: str,
+    tools_config: str | None,
+    memory_config: str | None,
+    model_config: str | None,
+    outdir: str,
+    llm_mode: str | None = None,
+) -> dict:
+    batch_file = Path(batch_input_path).resolve()
+    output_dir = Path(outdir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = read_json(batch_file)
+    tasks = payload.get("tasks") if isinstance(payload, dict) else payload
+    if not isinstance(tasks, list) or not tasks:
+        raise ValueError("batch input must be a non-empty list or an object with a tasks list")
+    results = []
+    for index, task in enumerate(tasks, 1):
+        if not isinstance(task, dict):
+            raise ValueError(f"batch task {index} must be an object")
+        task = _normalize_batch_task_paths(task, batch_file)
+        task_dir = output_dir / f"task_{index:03d}_{task.get('conversation_id', 'conversation')}"
+        task_dir.mkdir(parents=True, exist_ok=True)
+        task_input = task_dir / "runtime_input.json"
+        write_json(task, task_input)
+        try:
+            result = run_agent(
+                str(task_input),
+                tools_config,
+                memory_config,
+                model_config,
+                str(task_dir),
+                llm_mode,
+            )
+            results.append(
+                {
+                    "task_index": index,
+                    "conversation_id": result["conversation_id"],
+                    "status": result["status"],
+                    "outdir": str(task_dir),
+                    "final_answer_path": result["final_answer_path"],
+                    "trace_path": result["trace_path"],
+                }
+            )
+        except Exception as exc:
+            error_record = {
+                "task_index": index,
+                "conversation_id": task.get("conversation_id"),
+                "status": "error",
+                "outdir": str(task_dir),
+                "error": {"type": type(exc).__name__, "message": str(exc)},
+            }
+            results.append(error_record)
+            write_json(error_record, task_dir / "task_error.json")
+    report = {
+        "status": "success" if all(item["status"] in {"success", "partial"} for item in results) else "partial",
+        "task_count": len(tasks),
+        "success_count": sum(1 for item in results if item["status"] in {"success", "partial"}),
+        "results": results,
+    }
+    write_json(report, output_dir / "batch_report.json")
+    return report
+
+
+def _normalize_batch_task_paths(task: dict, batch_file: Path) -> dict:
+    normalized = deepcopy(task)
+
+    def absolutize(value: Any) -> Any:
+        if isinstance(value, str):
+            return str(resolve_from_file(value, batch_file))
+        return value
+
+    for field in ("system_prompt_path", "history_messages_path"):
+        if field in normalized:
+            normalized[field] = absolutize(normalized[field])
+    if isinstance(normalized.get("prompt_template_paths"), list):
+        normalized["prompt_template_paths"] = [absolutize(item) for item in normalized["prompt_template_paths"]]
+    if isinstance(normalized.get("conversation_turns"), list):
+        for turn in normalized["conversation_turns"]:
+            if not isinstance(turn, dict):
+                continue
+            if "system_prompt_path" in turn:
+                turn["system_prompt_path"] = absolutize(turn["system_prompt_path"])
+            if isinstance(turn.get("prompt_template_paths"), list):
+                turn["prompt_template_paths"] = [absolutize(item) for item in turn["prompt_template_paths"]]
+    fixtures = normalized.get("fixtures")
+    if isinstance(fixtures, dict):
+        for field in ("selected_memory_path", "tools_schema_path", "ai_messages_path", "tool_messages_path"):
+            if field in fixtures:
+                fixtures[field] = absolutize(fixtures[field])
+    return normalized
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Run the local Agent message and tool loop.")
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--input")
+    source.add_argument("--batch_input")
+    parser.add_argument("--tools_config")
+    parser.add_argument("--memory_config")
+    parser.add_argument("--model_config")
+    parser.add_argument("--llm_mode", choices=["mock", "prompt_json"], default=None)
+    parser.add_argument("--resume")
+    parser.add_argument("--outdir", required=True)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        tools_config = str(resolve_cli_path(args.tools_config)) if args.tools_config else None
+        memory_config = str(resolve_cli_path(args.memory_config)) if args.memory_config else None
+        model_config = str(resolve_cli_path(args.model_config)) if args.model_config else None
+        outdir = str(resolve_cli_path(args.outdir))
+        if args.batch_input:
+            result = run_batch(
+                str(resolve_cli_path(args.batch_input)),
+                tools_config,
+                memory_config,
+                model_config,
+                outdir,
+                args.llm_mode,
+            )
+            print(Path(outdir) / "batch_report.json")
+        else:
+            result = run_agent(
+                str(resolve_cli_path(args.input)),
+                tools_config,
+                memory_config,
+                model_config,
+                outdir,
+                args.llm_mode,
+                str(resolve_cli_path(args.resume)) if args.resume else None,
+            )
+            print(result["final_answer_path"])
+        return 0
+    except Exception as exc:
+        print(f"fatal: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,29 @@
+{
+  "tool_calls": [
+    {
+      "id": "b2_calc_001",
+      "name": "calculator",
+      "args": {"expression": "23 * 17 + 9"}
+    },
+    {
+      "id": "b2_read_001",
+      "name": "file_reader",
+      "args": {"path": "docs/agent_intro.txt", "max_chars": 2000}
+    },
+    {
+      "id": "b2_search_001",
+      "name": "local_file_search",
+      "args": {"query": "工具编排", "root_dir": "docs", "file_types": ["txt", "md"], "top_k": 3}
+    },
+    {
+      "id": "b2_table_001",
+      "name": "table_analyzer",
+      "args": {"path": "tables/results.csv", "max_rows_preview": 5, "describe": true}
+    },
+    {
+      "id": "b2_convert_001",
+      "name": "format_converter",
+      "args": {"text": "a: 1\nb: 2", "target_format": "markdown", "output_filename": "b2_basic.md"}
+    }
+  ]
+}

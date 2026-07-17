@@ -1,0 +1,6 @@
+{
+  "id": "plan_read_calc",
+  "user_input": "请读取 docs/agent_intro.txt，并计算 23 * 17 + 9，最后合并回答。",
+  "toolset": "basic_tools",
+  "max_plan_steps": 6
+}

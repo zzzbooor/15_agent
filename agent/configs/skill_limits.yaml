@@ -1,0 +1,48 @@
+{
+  "calculator": {
+    "max_expression_chars": 500,
+    "max_exponent": 20,
+    "max_integer_bits": 4096,
+    "max_abs_result": 1e100
+  },
+  "file_reader": {
+    "max_file_bytes": 10485760,
+    "max_read_chars": 10000
+  },
+  "search": {
+    "max_query_chars": 500,
+    "max_entries": 5000,
+    "max_files": 1000,
+    "max_file_bytes": 524288,
+    "max_total_bytes": 8388608,
+    "max_index_tokens": 300000,
+    "timeout_seconds": 5.0,
+    "max_top_k": 20,
+    "snippet_radius": 80,
+    "max_skipped_records": 20
+  },
+  "table": {
+    "max_file_bytes": 52428800,
+    "max_rows": 100000,
+    "max_preview_rows": 100
+  },
+  "format_converter": {
+    "max_input_bytes": 10485760,
+    "max_output_bytes": 10485760,
+    "max_collision_attempts": 1000
+  },
+  "sandbox": {
+    "max_code_chars": 5000,
+    "wall_timeout_seconds": 3.0,
+    "cpu_seconds": 2,
+    "memory_mb": 128,
+    "max_open_files": 16,
+    "max_processes": 1,
+    "max_operations": 50000,
+    "max_loop_iterations": 10000,
+    "max_output_bytes": 32768,
+    "max_container_items": 10000,
+    "max_string_bytes": 131072,
+    "max_integer_bits": 4096
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "vector_graph": {
+    "mem_course_001": [
+      "mem_conversation_conv_000",
+      "mem_conversation_conv_sample_001"
+    ],
+    "mem_conversation_conv_000": [
+      "mem_conversation_conv_sample_001",
+      "mem_course_001"
+    ],
+    "mem_conversation_conv_sample_001": [
+      "mem_conversation_conv_000",
+      "mem_course_001"
+    ]
+  },
+  "llm_graph": {
+    "mem_conversation_conv_sample_001": [
+      "mem_course_001",
+      "mem_conversation_conv_000"
+    ],
+    "mem_course_001": [
+      "mem_conversation_conv_sample_001"
+    ],
+    "mem_conversation_conv_000": [
+      "mem_conversation_conv_sample_001"
+    ]
+  }
+}

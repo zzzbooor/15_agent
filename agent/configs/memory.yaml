@@ -1,0 +1,23 @@
+memory:
+  root_dir: ../memory
+  global_memory_dir: global
+  conversation_memory_dir: conversations
+  index_path: memory_index.json
+  max_memory_chars: 2000
+  graph_path: memory_graph.json
+
+  retrieval:
+    keyword_top_k: 3
+    keyword_min_score: 0.0
+
+  # Real local-vector retrieval. This model is already present on the target
+  # server; local_files_only prevents downloads and there is no hash fallback.
+  embedding:
+    enabled: true
+    model_name_or_path: /root/siton-data-1f55405a64d24fe2819a81c90df30517/backup/finetune_demo/Qwen3-0.6B
+    tokenizer_name_or_path: /root/siton-data-1f55405a64d24fe2819a81c90df30517/backup/finetune_demo/Qwen3-0.6B
+    local_files_only: true
+    trust_remote_code: false
+    torch_dtype: bfloat16
+    device: cuda
+    max_length: 512

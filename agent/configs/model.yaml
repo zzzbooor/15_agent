@@ -1,0 +1,81 @@
+runtime:
+  default_mode: prompt_json
+  default_profile: qwen35_4b
+  default_binding: prompt_json
+  max_cached_models: 1
+
+# The legacy model block is retained for older scripts that have not adopted
+# profiles yet. B4 itself reads the profile registry below.
+model:
+  backend: transformers
+  model_name_or_path: /root/15/assignment_B/Qwen3.5-4B
+  tokenizer_name_or_path: /root/15/assignment_B/Qwen3.5-4B
+  local_files_only: true
+  trust_remote_code: true
+  torch_dtype: bfloat16
+  device: cuda
+  device_map: null
+
+profiles:
+  qwen35_4b:
+    backend: transformers
+    family: qwen3.5
+    native_parser: qwen35_xml
+    model_name_or_path: /root/15/assignment_B/Qwen3.5-4B
+    tokenizer_name_or_path: /root/15/assignment_B/Qwen3.5-4B
+    local_files_only: true
+    trust_remote_code: true
+    torch_dtype: bfloat16
+    device: cuda
+    device_map: null
+    max_input_tokens: 4096
+    generation:
+      max_new_tokens: 1024
+      do_sample: false
+
+  qwen3_1_7b:
+    backend: transformers
+    family: qwen3
+    native_parser: qwen3_json
+    model_name_or_path: /root/siton-data-1f55405a64d24fe2819a81c90df30517/model/Qwen3-1.7B
+    tokenizer_name_or_path: /root/siton-data-1f55405a64d24fe2819a81c90df30517/model/Qwen3-1.7B
+    local_files_only: true
+    trust_remote_code: true
+    torch_dtype: bfloat16
+    device: cuda
+    device_map: null
+    max_input_tokens: 4096
+    generation:
+      max_new_tokens: 768
+      do_sample: false
+
+routing:
+  planner_profile: qwen35_4b
+  fast_profile: qwen3_1_7b
+  fast_max_input_chars: 1800
+  fast_max_tools: 8
+
+generation:
+  max_new_tokens: 1024
+  do_sample: false
+  temperature: 0
+  top_p: 1
+
+context:
+  max_input_tokens: 4096
+
+tool_calling:
+  mode: prompt_json
+  supported_bindings: [prompt_json, native_tools]
+
+prompts:
+  prompt_json: ../prompts/b4_prompt_json.txt
+  native_tools: ../prompts/b4_native_tools.txt
+  planner: ../prompts/b4_planner.txt
+  synthesizer: ../prompts/b4_synthesizer.txt
+
+outputs:
+  save_raw_output: true
+  save_ai_message: true
+  save_prompt_text: true
+  save_token_usage: true

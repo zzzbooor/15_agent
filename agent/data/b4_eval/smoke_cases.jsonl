@@ -1,0 +1,2 @@
+{"id":"calculator_single","user_input":"请使用计算工具精确计算 23 * 17 + 9。","expected_tool_calls":[{"name":"calculator","args_contains":{"expression":"23 * 17 + 9"}}]}
+{"id":"multi_read_calculate","user_input":"请同时读取 docs/agent_intro.txt 并计算 8 * 9 + 6，两个任务彼此独立。","expected_tool_calls":[{"name":"file_reader","args_contains":{"path":"docs/agent_intro.txt"}},{"name":"calculator","args_contains":{"expression":"8 * 9 + 6"}}]}

@@ -1,0 +1,8 @@
+{"id":"no_tool_agent_definition","user_input":"不用调用工具，用一句中文解释什么是 Agent。","expected_tool_calls":[]}
+{"id":"calculator_single","user_input":"请使用计算工具精确计算 23 * 17 + 9。","expected_tool_calls":[{"name":"calculator","args_contains":{"expression":"23 * 17 + 9"}}]}
+{"id":"file_reader_single","user_input":"请读取 docs/agent_intro.txt，然后总结内容。","expected_tool_calls":[{"name":"file_reader","args_contains":{"path":"docs/agent_intro.txt"}}]}
+{"id":"local_search_single","user_input":"请在 docs 目录搜索关于 tool calling 的本地资料。","expected_tool_calls":[{"name":"local_file_search","args_contains":{"query":"tool calling","root_dir":"docs"}}]}
+{"id":"table_single","user_input":"请分析 tables/results.csv 的行列数和数值统计。","expected_tool_calls":[{"name":"table_analyzer","args_contains":{"path":"tables/results.csv"}}]}
+{"id":"multi_read_calculate","user_input":"请同时读取 docs/agent_intro.txt 并计算 8 * 9 + 6，两个任务彼此独立。","expected_tool_calls":[{"name":"file_reader","args_contains":{"path":"docs/agent_intro.txt"}},{"name":"calculator","args_contains":{"expression":"8 * 9 + 6"}}]}
+{"id":"multi_search_calculate","user_input":"请同时搜索 docs 中的 Memory 资料并计算 144 / 12，两个任务彼此独立。","expected_tool_calls":[{"name":"local_file_search","args_contains":{"query":"Memory","root_dir":"docs"}},{"name":"calculator","args_contains":{"expression":"144 / 12"}}]}
+{"id":"english_calculator","user_input":"Use the calculator tool to compute 125 * 8 exactly.","expected_tool_calls":[{"name":"calculator","args_contains":{"expression":"125 * 8"}}]}

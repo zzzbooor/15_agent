@@ -1,0 +1,10 @@
+{
+  "conversation_id": "b4_compat_mock",
+  "user_input": "Read docs/agent_intro.txt and summarize it.",
+  "system_prompt_path": "../../prompts/local_tool_agent.txt",
+  "selected_memory_ids": [],
+  "use_global_memory": false,
+  "toolset": "basic_tools",
+  "max_turns": 2,
+  "save_memory": "none"
+}

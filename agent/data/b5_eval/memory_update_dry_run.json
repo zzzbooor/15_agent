@@ -1,0 +1,9 @@
+{
+  "memory_id": "mem_course_001",
+  "updates": [
+    "验收方式: 使用结构化 trace 和真实模型原始输出",
+    "Agent 系统由本地模型、工具层、Skill 和 Memory 协同完成任务"
+  ],
+  "conflict_policy": "record",
+  "dry_run": true
+}

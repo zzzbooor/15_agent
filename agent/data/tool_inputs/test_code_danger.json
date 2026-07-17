@@ -1,0 +1,1 @@
+{"code": "import os\nos.system(\"ls\")"}

@@ -1,0 +1,12 @@
+# Acceptance environment: /opt/conda/bin/python (Python 3.10.18)
+# Verified on NVIDIA H200 with the server-provided PyTorch CUDA build.
+# Do not replace the installed torch wheel solely from this file; its CUDA
+# suffix must match the host driver/toolkit.
+
+PyYAML>=6.0,<7
+torch>=2.5,<3
+transformers>=5.12,<6
+safetensors>=0.8,<1
+tokenizers>=0.22,<1
+huggingface_hub>=1.21,<2
+numpy>=2.2,<3
